@@ -1,0 +1,17 @@
+LASH GERMANO — FOTO PRINCIPAL CORRIGIDA
+
+A causa do erro era vite.config.ts: o Vite procurava a foto na pasta public da raiz, enquanto ela estava em client/public.
+Agora publicDir aponta para client/public. A foto hero-lash.jpg foi incluída e é um JPEG válido.
+
+COMO TESTAR NO WINDOWS:
+1. Extraia este ZIP em uma PASTA NOVA (não misture com a antiga).
+2. Abra a pasta atelier-cilios extraída no VS Code.
+3. Copie seu arquivo .env privado do projeto antigo para esta pasta, sem enviá-lo a ninguém.
+4. No terminal, nesta pasta: npm install
+5. Execute: npm run dev
+6. Abra o endereço Local apresentado no terminal.
+7. Confira diretamente /hero-lash.jpg no endereço local do Vite; a foto deve abrir sozinha.
+8. Abra a página inicial e veja a foto na moldura.
+
+Não é necessário mudar main.tsx para carregar a foto. Não use a pasta do site anterior enquanto verifica esta versão.
+NÃO PUBLIQUE O .env. Como suas credenciais foram expostas em capturas anteriores, troque ambas antes de publicar em HTTPS.

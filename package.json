@@ -1,0 +1,41 @@
+{
+  "name": "atelier-cilios",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:server": "tsx watch server/src/index.ts",
+    "dev:client": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit -p server/tsconfig.json && tsc --noEmit -p client/tsconfig.json && vite build",
+    "start": "tsx server/src/index.ts",
+    "build:cloudflare": "tsc --noEmit -p client/tsconfig.json && vite build",
+    "deploy:cloudflare": "npm run build:cloudflare && wrangler deploy"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^4.7.0",
+    "concurrently": "^9.2.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.0.0",
+    "lucide-react": "^0.468.0",
+    "multer": "^1.4.5-lts.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "sharp": "^0.33.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.5",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "wrangler": "^4.0.0"
+  }
+}
