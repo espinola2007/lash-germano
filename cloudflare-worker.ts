@@ -2,13 +2,13 @@
 import { z } from 'zod';
 
 type Service = { id: string; name: string; application: number; maintenance: number; image: string | null };
-type Config = { studioName: string; tagline: string; whatsapp: string; days: number[]; startTime: string; endTime: string; interval: number; blockedDates: string[]; services: Service[] };
-type Database = { prepare(sql: string): { bind(...args: unknown[]): { first<T = Record<string, unknown>>(): Promise<T | null>; run(): Promise<unknown> } } };
+type Config = { studioName: string; tagline: string; whatsapp: string; days: number[]; startTime: string; endTime: string; interval: number; applicationMinutes: number; maintenanceMinutes: number; blockedDates: string[]; services: Service[] };
+type Database = { prepare(sql: string): { bind(...args: unknown[]): { first<T = Record<string, unknown>>(): Promise<T | null>; run(): Promise<{meta?:{changes?:number}}> ; all<T = Record<string, unknown>>(): Promise<{results:T[]}> } } };
 type Env = { DB: Database; ADMIN_PASSWORD: string; SESSION_SECRET: string; ASSETS: { fetch(request: Request): Promise<Response> } };
 const names = ['Brasileiro 3D', 'Fox Eyes', 'Sirena', 'Glow', 'Glamour', 'Efeito Wispy', 'Efeito Suave'];
 const apps = [90,95,85,100,90,120,100];
 const upkeep = [70,70,65,75,70,80,75];
-const defaults: Config = { studioName:'Lash Germano', tagline:'Seu olhar, sua essência.', whatsapp:'', days:[1,2,3,4,5,6], startTime:'09:00', endTime:'18:00', interval:60, blockedDates:[], services:names.map((name,i)=>({id:`modelo-${i+1}`,name,application:apps[i],maintenance:upkeep[i],image:null})) };
+const defaults: Config = { studioName:'Lash Germano', tagline:'Seu olhar, sua essência.', whatsapp:'', days:[1,2,3,4,5,6], startTime:'09:00', endTime:'18:00', interval:60, applicationMinutes:120, maintenanceMinutes:60, blockedDates:[], services:names.map((name,i)=>({id:`modelo-${i+1}`,name,application:apps[i],maintenance:upkeep[i],image:null})) };
 const limit = 1_500_000;
 const sessionLength = 8*60*60*1000;
 const enc = new TextEncoder();
@@ -21,11 +21,18 @@ function same(a:Uint8Array,b:Uint8Array) { if(a.length!==b.length)return false;l
 function cookie(req:Request) { const all=req.headers.get('cookie')??''; const found=all.split(';').map(s=>s.trim()).find(s=>s.startsWith('__Host-lash_admin='));return found?.slice('__Host-lash_admin='.length)??''; }
 function setCookie(value:string,maxAge:number) { return `__Host-lash_admin=${value}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${maxAge}`; }
 async function authed(req:Request,env:Env) { const raw=cookie(req);const [exp,nonce,signature]=raw.split('.');if(!exp||!nonce||!signature||!/^[0-9]{13}$/.test(exp)||!/^[a-f0-9]{64}$/.test(nonce)||!/^[a-f0-9]{64}$/.test(signature)||Number(exp)<Date.now())return false; if(!same(hexToBytes(signature),hexToBytes(await mac(env.SESSION_SECRET,`session:${exp}:${nonce}`))))return false; const session=await env.DB.prepare('SELECT id FROM sessions WHERE id=? AND until>?').bind(nonce,Date.now()).first();return !!session; }
-async function getConfig(env:Env):Promise<Config> { const row=await env.DB.prepare('SELECT value FROM settings WHERE key = ?').bind('config').first<{value:string}>();return row?JSON.parse(row.value) as Config: structuredClone(defaults); }
+async function getConfig(env:Env):Promise<Config> { const row=await env.DB.prepare('SELECT value FROM settings WHERE key = ?').bind('config').first<{value:string}>();return row?{...structuredClone(defaults),...JSON.parse(row.value) as Partial<Config>}: structuredClone(defaults); }
 async function saveConfig(env:Env,config:Config) { await env.DB.prepare('INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').bind('config',JSON.stringify(config)).run(); }
+type Block = { id: string; date: string; start: string; end: string };
+const dateFormat = /^\d{4}-\d{2}-\d{2}$/;
+const validDate = (value:string) => dateFormat.test(value) && !Number.isNaN(Date.parse(value)) && new Date(`${value}T12:00:00Z`).toISOString().slice(0,10)===value;
+const minute = (value:string) => Number(value.slice(0,2))*60 + Number(value.slice(3,5));
+const timeFormat = /^([01]\d|2[0-3]):[0-5]\d$/;
+const todayBrazil = () => new Intl.DateTimeFormat('en-CA',{timeZone:'America/Fortaleza',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+const blockInput = z.object({date:z.string(),start:z.string(),end:z.string()}).strict();
 const hhmm = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 const serviceInput = z.object({id:z.string(),name:z.string().trim().min(2).max(80),application:z.number().min(0).max(100000),maintenance:z.number().min(0).max(100000),image:z.string().nullable()});
-const configInput = z.object({studioName:z.string().trim().min(2).max(80),tagline:z.string().trim().max(160),whatsapp:z.string().regex(/^(|[1-9][0-9]{9,14})$/),days:z.array(z.number().int().min(0).max(6)).min(1).max(7),startTime:hhmm,endTime:hhmm,interval:z.number().int().min(15).max(240),blockedDates:z.array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)).max(365),services:z.array(serviceInput).length(7)}).strict();
+const configInput = z.object({studioName:z.string().trim().min(2).max(80),tagline:z.string().trim().max(160),whatsapp:z.string().regex(/^(|[1-9][0-9]{9,14})$/),days:z.array(z.number().int().min(0).max(6)).min(1).max(7),startTime:hhmm,endTime:hhmm,interval:z.number().int().min(15).max(240),applicationMinutes:z.number().int().min(15).max(480),maintenanceMinutes:z.number().int().min(15).max(480),blockedDates:z.array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)).max(365),services:z.array(serviceInput).length(7)}).strict();
 async function jsonBody(req:Request) { const str=await req.text(); if(str.length>25000) throw new Error('too_large');return JSON.parse(str); }
 function allowedFormat(buf:Uint8Array):string|null { if(buf.length>=4&&buf[0]===0xff&&buf[1]===0xd8&&buf[2]===0xff)return 'image/jpeg';if(buf.length>=8&&buf[0]===137&&buf[1]===80&&buf[2]===78&&buf[3]===71&&buf[4]===13&&buf[5]===10&&buf[6]===26&&buf[7]===10)return 'image/png';if(buf.length>=12&&new TextDecoder().decode(buf.slice(0,4))==='RIFF'&&new TextDecoder().decode(buf.slice(8,12))==='WEBP')return 'image/webp';return null; }
 function security(res:Response) { res.headers.set('X-Content-Type-Options','nosniff');res.headers.set('Referrer-Policy','strict-origin-when-cross-origin');res.headers.set('X-Frame-Options','DENY');return res; }
@@ -35,6 +42,12 @@ async function handle(request:Request,env:Env):Promise<Response> {
  if(path.startsWith('/api/')||path.startsWith('/uploads/')) {
    if(!['GET','HEAD','OPTIONS'].includes(method)&&request.headers.get('Origin')!==url.origin)return error('Origem não autorizada.',403);
    if(method==='GET'&&path==='/api/public')return reply(await getConfig(env));
+   if(method==='GET'&&path==='/api/availability') {
+     const day=url.searchParams.get('date')??'';
+     if(!validDate(day))return error('Data inválida.');
+     const rows=await env.DB.prepare('SELECT start,end FROM calendar_blocks WHERE date=? ORDER BY start').bind(day).all<{start:string;end:string}>();
+     return reply({date:day,blocks:rows.results});
+   }
    if(method==='GET'&&path==='/api/admin/session')return reply({authenticated:await authed(request,env)});
    if(method==='GET'&&path.startsWith('/uploads/')) {
       const id=path.slice('/uploads/'.length); if(!/^[a-z0-9-]{15,80}$/.test(id))return error('Imagem não encontrada.',404);
@@ -61,6 +74,31 @@ async function handle(request:Request,env:Env):Promise<Response> {
       const out=reply({authenticated:true});out.headers.set('Set-Cookie',setCookie(`${exp}.${nonce}.${sig}`,Math.floor(sessionLength/1000)));return out;
    }
    if(!await authed(request,env))return error('Acesso restrito.',401);
+   if(method==='GET'&&path==='/api/admin/blocks') {
+     const rows=await env.DB.prepare('SELECT id,date,start,end FROM calendar_blocks WHERE date >= ? ORDER BY date,start LIMIT 500').bind(todayBrazil()).all<Block>();
+     return reply({blocks:rows.results});
+   }
+   if(method==='POST'&&path==='/api/admin/blocks') {
+     let input:unknown;try{input=await jsonBody(request);}catch{return error('Dados inválidos.');}
+     const parsed=blockInput.safeParse(input);
+     if(!parsed.success)return error('Preencha data e horários válidos.');
+     const {date,start,end}=parsed.data;
+     if(!validDate(date)||date<todayBrazil()||!timeFormat.test(start)||!timeFormat.test(end)||minute(end)<=minute(start))return error('Data ou período inválido.');
+     const cfg=await getConfig(env);
+     if(start<cfg.startTime||end>cfg.endTime)return error('O período deve estar dentro do expediente configurado.');
+     if(!cfg.days.includes(new Date(`${date}T12:00:00Z`).getUTCDay())||cfg.blockedDates.includes(date))return error('Esta data está bloqueada no expediente.');
+     const id=crypto.randomUUID();
+     const result=await env.DB.prepare(`INSERT INTO calendar_blocks (id,date,start,end)
+       SELECT ?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM calendar_blocks WHERE date=? AND start<? AND end>?)`).bind(id,date,start,end,date,end,start).run();
+     if(!result.meta?.changes)return error('Este período conflita com um horário já reservado.',409);
+     return reply({block:{id,date,start,end}},201);
+   }
+   if(method==='DELETE'&&/^\/api\/admin\/blocks\/[a-f0-9-]{36}$/.test(path)) {
+     const id=path.split('/').pop()!;
+     const result=await env.DB.prepare('DELETE FROM calendar_blocks WHERE id=?').bind(id).run();
+     if(!result.meta?.changes)return error('Bloqueio não encontrado.',404);
+     return reply({ok:true});
+   }
    if(method==='POST'&&path==='/api/admin/logout') { const nonce=cookie(request).split('.')[1];if(nonce)await env.DB.prepare('DELETE FROM sessions WHERE id=?').bind(nonce).run(); const out=reply({ok:true});out.headers.set('Set-Cookie',setCookie('',0));return out; }
    if(method==='PUT'&&path==='/api/admin/config') {
       let body:unknown;try{body=await jsonBody(request);}catch{return error('Dados inválidos.');}

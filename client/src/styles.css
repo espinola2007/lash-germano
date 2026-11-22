@@ -1788,3 +1788,7 @@ p {
     height: 64px;
     object-fit: contain;
 }
+/* Reservas da agenda da proprietária */
+.calendar-blocks{display:grid;gap:10px;margin-top:20px}
+.calendar-block{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 16px;background:#fffaf9;border:1px solid #ead9dc;border-radius:12px;flex-wrap:wrap}
+.calendar-block .btn{padding:9px 14px;min-width:0}

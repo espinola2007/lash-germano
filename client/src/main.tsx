@@ -4,12 +4,13 @@ import { ArrowRight, ArrowLeft, CalendarDays, Check, ChevronRight, Clock3, Heart
 import './styles.css';
 
 type Service = { id: string; name: string; application: number; maintenance: number; image: string | null };
-type Config = { studioName: string; tagline: string; whatsapp: string; days: number[]; startTime: string; endTime: string; interval: number; blockedDates: string[]; services: Service[] };
+type Config = { studioName: string; tagline: string; whatsapp: string; days: number[]; startTime: string; endTime: string; interval: number; applicationMinutes: number; maintenanceMinutes: number; blockedDates: string[]; services: Service[] };
+type Block = { id: string; date: string; start: string; end: string };
 type Stage = 0 | 1 | 2 | 3 | 4;
 const money = (n: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(n);
 const weekdays = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
 const dateISO = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-const today = () => dateISO(new Date());
+const today = () => new Intl.DateTimeFormat('en-CA',{timeZone:'America/Fortaleza',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
 const fromISO = (s: string) => new Date(`${s}T12:00:00`);
 const prettyDate = (s: string) => new Intl.DateTimeFormat('pt-BR', { day: 'numeric', month: 'long', year: 'numeric' }).format(fromISO(s));
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
@@ -38,7 +39,19 @@ function App() {
   const [notes, setNotes] = useState('');
   const [formError, setFormError] = useState('');
   const [monthOffset, setMonthOffset] = useState(0);
+  const [occupied, setOccupied] = useState<{date:string;blocks:Pick<Block,'start'|'end'>[]}|null>(null);
+  const [availabilityError, setAvailabilityError] = useState('');
+  const [checking, setChecking] = useState(false);
   useEffect(() => { api<Config>('/api/public').then(setCfg).catch(e => setLoadError(e.message)); }, []);
+  useEffect(() => {
+    if(!date || admin || !cfg)return;
+    let alive=true;
+    setOccupied(null);setAvailabilityError('');
+    api<{date:string;blocks:Pick<Block,'start'|'end'>[]}>('/api/availability?date='+encodeURIComponent(date))
+      .then(data=>{if(alive)setOccupied(data);})
+      .catch(e=>{if(alive)setAvailabilityError((e as Error).message);});
+    return ()=>{alive=false;};
+  },[date,admin,cfg]);
   const service = cfg?.services.find(s => s.id === selected);
   const price = service ? service[kind] : 0;
   const slots = useMemo(() => {
@@ -51,6 +64,20 @@ function App() {
     }
     return output;
   }, [cfg]);
+  const duration = kind==='application' ? cfg?.applicationMinutes ?? 120 : cfg?.maintenanceMinutes ?? 60;
+  const availableSlots = useMemo(() => {
+    if(!date || occupied?.date!==date || !cfg)return [];
+    const toMinutes=(v:string)=>Number(v.slice(0,2))*60+Number(v.slice(3,5));
+    const closing=toMinutes(cfg.endTime);
+    const now = new Date();
+    const brazilTime = new Intl.DateTimeFormat('en-GB',{timeZone:'America/Fortaleza',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(now);
+    return slots.filter(start=>{
+      const from=toMinutes(start),to=from+duration;
+      if(to>closing || (date===today() && start<=brazilTime))return false;
+      return !occupied.blocks.some(b=>from<toMinutes(b.end)&&to>toMinutes(b.start));
+    });
+  },[date,occupied,cfg,slots,duration]);
+  useEffect(()=>{if(time && occupied?.date===date && !availableSlots.includes(time))setTime('');},[date,time,occupied,availableSlots]);
   const dates = useMemo(() => {
     if (!cfg) return [];
     const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() + monthOffset);
@@ -65,12 +92,12 @@ function App() {
   const next = () => {
     setFormError('');
     if (step === 0 && !selected) return setFormError('Selecione um modelo para continuar.');
-    if (step === 2 && (!date || !time)) return setFormError('Escolha uma data e um horário de preferência.');
+    if (step === 2 && (!date || !time || occupied?.date!==date || !availableSlots.includes(time))) return setFormError('Escolha um horário disponível.');
     if (step === 3 && (fullName.trim().length < 3 || fullName.trim().length > 100 || !/^[0-9()+\s-]{10,20}$/.test(phone.trim()))) return setFormError('Informe seu nome completo e um telefone válido com DDD.');
     setStep(s => Math.min(4, s + 1) as Stage);
   };
   const contact = () => { if (!cfg?.whatsapp) { setFormError('O WhatsApp do estúdio ainda não foi configurado.'); return; } window.open(`https://wa.me/${cfg.whatsapp}`, '_blank', 'noopener,noreferrer'); };
-  const finalize = () => {
+  const finalize = async () => {
     if (!cfg || !service || !cfg.whatsapp) { setFormError('O WhatsApp do estúdio ainda não foi configurado.'); return; }
 
 const text = `Olá! Gostaria de solicitar um agendamento.
@@ -84,7 +111,23 @@ Horário desejado: ${time}${notes.trim() ? `\nObservações: ${notes.trim()}` : 
 
 Gostaria de confirmar a disponibilidade desse horário. Obrigada!`;
 
-    window.open(`https://wa.me/${cfg.whatsapp}?text=${encodeURIComponent(text)}`, '_blank', 'noopener,noreferrer');
+    // Abre o WhatsApp imediatamente para não sofrer bloqueio de pop-ups.
+    // A consulta feita em seguida impede continuar se a reserva já foi registrada.
+    if(checking)return;
+    setChecking(true);setFormError('');
+    const popup=window.open('about:blank','_blank');
+    try {
+      const current=await api<{blocks:Pick<Block,'start'|'end'>[]}>('/api/availability?date='+encodeURIComponent(date));
+      const toM=(v:string)=>Number(v.slice(0,2))*60+Number(v.slice(3,5));
+      const begin=toM(time),finish=begin+duration;
+      if(current.blocks.some(b=>begin<toM(b.end)&&finish>toM(b.start)) || finish>toM(cfg.endTime)){
+        popup?.close();setFormError('Este horário acabou de ficar indisponível. Escolha outro.');setTime('');setStep(2);setOccupied({date,blocks:current.blocks});return;
+      }
+      const link=`https://wa.me/${cfg.whatsapp}?text=${encodeURIComponent(text)}`;
+      if(popup)popup.location.href=link;else window.location.href=link;
+    }catch(e){popup?.close();setFormError('Não foi possível verificar a disponibilidade. Tente novamente.');}
+    finally{setChecking(false);}
+
   };
   if (loadError) return <div className="loading">Não foi possível carregar o site: {loadError}</div>;
   if (!cfg) return <div className="loading">Preparando seu momento de beleza…</div>;
@@ -121,11 +164,11 @@ Gostaria de confirmar a disponibilidade desse horário. Obrigada!`;
         <section className="booking-section" id="agendamento"><div className="container"><div className="booking-head"><div className="eyebrow justify-center"><span className="eyebrow-line"/> SEU MOMENTO ESPECIAL <span className="eyebrow-line"/></div><h2>Agende seu <i>momento.</i></h2><p>Simples, rápido e feito com carinho. Escolha sua preferência e finalize pelo WhatsApp.</p></div><div className="booking-box"><div className="step-header">{['Modelo', 'Procedimento', 'Data e hora', 'Seus dados', 'Revisar'].map((label, i) => <div className={`step-item ${i === step ? 'current' : ''} ${i < step ? 'done' : ''}`} key={label}><span className="step-dot">{i < step ? <Check size={14}/> : i + 1}</span><small>{label}</small></div>)}</div><div className="step-body">
           {step === 0 && <><div className="step-heading"><span>01 — O PRIMEIRO PASSO</span><h3>Qual efeito combina com você?</h3><p>Escolha um dos nossos modelos de extensão de cílios.</p></div><div className="mini-model-grid">{cfg.services.map(s => <button key={s.id} className={`mini-model ${selected === s.id ? 'selected' : ''}`} onClick={() => setSelected(s.id)}><Photo service={s}/><span>{s.name}</span>{selected === s.id && <Check className="mini-check" size={18}/>}</button>)}</div></>}
           {step === 1 && <><div className="step-heading"><span>02 — PERSONALIZE SUA ESCOLHA</span><h3>Qual tipo de atendimento?</h3><p>Selecione o procedimento que deseja realizar.</p></div><div className="choice-grid"><button className={`choice-card ${kind === 'application' ? 'selected' : ''}`} onClick={() => setKind('application')}><Sparkles size={28}/><h4>Primeira aplicação</h4><p>Para um novo olhar.</p><strong>{money(service?.application ?? 0)}</strong><span className="radio-dot"/></button><button className={`choice-card ${kind === 'maintenance' ? 'selected' : ''}`} onClick={() => setKind('maintenance')}><Heart size={28}/><h4>Manutenção</h4><p>Para renovar a beleza do seu olhar.</p><strong>{money(service?.maintenance ?? 0)}</strong><span className="radio-dot"/></button></div></>}
-          {step === 2 && <><div className="step-heading"><span>03 — O MOMENTO IDEAL</span><h3>Quando você gostaria de vir?</h3><p>Selecione uma data e um horário de preferência. A disponibilidade será confirmada pelo estúdio no WhatsApp.</p></div><div className="calendar-grid"><div className="calendar"><div className="calendar-heading"><button aria-label="Mês anterior" disabled={monthOffset === 0} onClick={() => setMonthOffset(n => n - 1)}><ArrowLeft size={17}/></button><strong>{titleMonth}</strong><button aria-label="Mês seguinte" disabled={monthOffset >= 6} onClick={() => setMonthOffset(n => n + 1)}><ArrowRight size={17}/></button></div><div className="calendar-cells">{weekdays.map(x => <span className="weekday" key={x}>{x}</span>)}{dates.map((d, i) => { const valid = !!d && d >= today() && cfg.days.includes(fromISO(d).getDay()) && !cfg.blockedDates.includes(d); return d ? <button key={d} disabled={!valid} className={date === d ? 'active-day' : ''} onClick={() => { setDate(d); setTime(''); }}>{Number(d.slice(8))}</button> : <span key={`blank-${i}`}/>; })}</div></div><div className="time-select"><div className="time-title"><Clock3 size={18}/> Horários de preferência</div>{date ? <><p>Para {prettyDate(date)}</p><div className="slots">{slots.map(x => <button key={x} onClick={() => setTime(x)} className={time === x ? 'active' : ''}>{x}</button>)}</div>{!slots.length && <p>O estúdio ainda não definiu horários.</p>}</> : <div className="time-empty"><CalendarDays size={35}/><p>Escolha uma data ao lado para visualizar os horários.</p></div>}</div></div><div className="hint"><ShieldCheck size={17}/> Horários sujeitos a confirmação. A escolha não é uma reserva automática.</div></>}
+          {step === 2 && <><div className="step-heading"><span>03 — O MOMENTO IDEAL</span><h3>Quando você gostaria de vir?</h3><p>Selecione uma data e um horário de preferência. A disponibilidade será confirmada pelo estúdio no WhatsApp.</p></div><div className="calendar-grid"><div className="calendar"><div className="calendar-heading"><button aria-label="Mês anterior" disabled={monthOffset === 0} onClick={() => setMonthOffset(n => n - 1)}><ArrowLeft size={17}/></button><strong>{titleMonth}</strong><button aria-label="Mês seguinte" disabled={monthOffset >= 6} onClick={() => setMonthOffset(n => n + 1)}><ArrowRight size={17}/></button></div><div className="calendar-cells">{weekdays.map(x => <span className="weekday" key={x}>{x}</span>)}{dates.map((d, i) => { const valid = !!d && d >= today() && cfg.days.includes(fromISO(d).getDay()) && !cfg.blockedDates.includes(d); return d ? <button key={d} disabled={!valid} className={date === d ? 'active-day' : ''} onClick={() => { setDate(d); setTime(''); }}>{Number(d.slice(8))}</button> : <span key={`blank-${i}`}/>; })}</div></div><div className="time-select"><div className="time-title"><Clock3 size={18}/> Horários de preferência</div>{date ? <><p>Para {prettyDate(date)}</p><div className="slots">{availableSlots.map(x => <button key={x} onClick={() => setTime(x)} className={time === x ? 'active' : ''}>{x}</button>)}</div>{availabilityError && <p className="error">Não foi possível consultar a agenda: {availabilityError}</p>}{!availabilityError && occupied?.date!==date && <p>Consultando horários disponíveis…</p>}{!availabilityError && occupied?.date===date && !availableSlots.length && <p>Não há horários livres nesta data para este procedimento.</p>}</> : <div className="time-empty"><CalendarDays size={35}/><p>Escolha uma data ao lado para visualizar os horários.</p></div>}</div></div><div className="hint"><ShieldCheck size={17}/> Horários sujeitos a confirmação. A escolha não é uma reserva automática.</div></>}
           {step === 3 && <><div className="step-heading"><span>04 — QUEREMOS CONHECER VOCÊ</span><h3>Conte um pouquinho sobre você.</h3><p>Precisamos apenas destes dados para preparar sua solicitação.</p></div><div className="form-fields"><label>Nome completo *<input maxLength={100} value={fullName} onChange={e => setFullName(e.target.value)} autoComplete="name" placeholder="Como podemos chamar você?"/></label><label>Telefone / WhatsApp com DDD *<input maxLength={20} value={phone} onChange={e => setPhone(e.target.value)} autoComplete="tel" type="tel" placeholder="(83) 99999-9999"/></label><label>Alguma observação? (opcional)<textarea maxLength={500} rows={4} value={notes} onChange={e => setNotes(e.target.value)} placeholder="Se quiser, conte algo que devemos saber…"/></label></div><small className="privacy-mini">Seus dados são usados apenas para preencher a mensagem no WhatsApp. Não são salvos neste site.</small></>}
           {step === 4 && <><div className="step-heading"><span>05 — TUDO PRONTINHO</span><h3>Vamos conferir os detalhes?</h3><p>Revise suas escolhas antes de enviar a solicitação.</p></div><div className="summary"><div className="summary-photo">{service && <Photo service={service}/>}</div><div className="summary-details"><div className="summary-item"><span>Cliente</span><strong>{fullName}</strong></div><div className="summary-item"><span>Modelo</span><strong>{service?.name}</strong></div><div className="summary-item"><span>Procedimento</span><strong>{kind === 'application' ? 'Primeira aplicação' : 'Manutenção'}</strong></div><div className="summary-item"><span>Data desejada</span><strong>{prettyDate(date)}</strong></div><div className="summary-item"><span>Horário desejado</span><strong>{time}</strong></div><div className="summary-total"><span>Valor previsto</span><strong>{money(price)}</strong></div></div></div><div className="hint"><MessageCircle size={17}/> Seu agendamento só será confirmado após a resposta do estúdio pelo WhatsApp.</div></>}
           {formError && <div className="error" role="alert">{formError}</div>}
-          <div className="step-actions">{step > 0 ? <button className="btn btn-outline" onClick={() => { setStep(s => (s - 1) as Stage); setFormError(''); }}><ArrowLeft size={17}/> Voltar</button> : <span/>}{step < 4 ? <button className="btn btn-primary" onClick={next}>Continuar <ArrowRight size={17}/></button> : <button className="btn btn-primary" onClick={finalize}><MessageCircle size={18}/> Finalizar pelo WhatsApp</button>}</div>
+          <div className="step-actions">{step > 0 ? <button className="btn btn-outline" onClick={() => { setStep(s => (s - 1) as Stage); setFormError(''); }}><ArrowLeft size={17}/> Voltar</button> : <span/>}{step < 4 ? <button className="btn btn-primary" onClick={next}>Continuar <ArrowRight size={17}/></button> : <button className="btn btn-primary" onClick={finalize} disabled={checking}><MessageCircle size={18}/> {checking?'Verificando…':'Finalizar pelo WhatsApp'}</button>}</div>
         </div></div></div></section>
         <section className="closing" id="contato"><div className="container closing-inner"><div className="closing-icon">
   
@@ -148,6 +191,19 @@ function Admin({ cfg, update }: { cfg: Config; update: (v: Config) => void }) {
   const [busy, setBusy] = useState(false);
   const [preview, setPreview] = useState<Record<string, string>>({});
   const [pending, setPending] = useState<Record<string, File>>({});
+  const [blocks, setBlocks] = useState<Block[]>([]);
+  const [blockDate, setBlockDate] = useState(today());
+  const [blockStart, setBlockStart] = useState('09:00');
+  const [blockEnd, setBlockEnd] = useState('10:00');
+  const refreshBlocks = async () => { const data=await api<{blocks:Block[]}>('/api/admin/blocks');setBlocks(data.blocks); };
+  useEffect(()=>{if(authenticated)void refreshBlocks().catch(e=>setStatus((e as Error).message));},[authenticated]);
+  const addBlock=async(e:React.FormEvent)=>{e.preventDefault();setBusy(true);setStatus('');try{
+    await api('/api/admin/blocks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({date:blockDate,start:blockStart,end:blockEnd})});
+    await refreshBlocks();setStatus('Horário reservado com sucesso.');
+  }catch(e){setStatus((e as Error).message);}finally{setBusy(false);}};
+  const removeBlock=async(id:string)=>{if(!window.confirm('Liberar este horário para novas solicitações?'))return;setBusy(true);setStatus('');try{
+    await api('/api/admin/blocks/'+id,{method:'DELETE'});await refreshBlocks();setStatus('Horário liberado com sucesso.');
+  }catch(e){setStatus((e as Error).message);}finally{setBusy(false);}};
   useEffect(() => { api<{authenticated:boolean}>('/api/admin/session').then(x => setAuthenticated(x.authenticated)).catch(() => {}); }, []);
   useEffect(() => { setDraft(structuredClone(cfg)); }, [cfg]);
   const login = async (e: React.FormEvent) => { e.preventDefault(); setStatus(''); setBusy(true); try { await api('/api/admin/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }) }); setPassword(''); setAuthenticated(true); } catch (e) { setStatus((e as Error).message); } finally { setBusy(false); } };
@@ -178,7 +234,11 @@ function Admin({ cfg, update }: { cfg: Config; update: (v: Config) => void }) {
     {status && <div className={status.includes('sucesso') || status.includes('removida') ? 'success' : 'error'} role="status">{status}</div>}
     <section className="admin-panel"><div className="panel-heading"><ImagePlus size={21}/><div><h2>Gerenciar imagens</h2><p>Escolha uma fotografia para cada um dos sete modelos. Até 5 MB por foto.</p></div></div><div className="admin-photos">{draft.services.map(s => <div className="admin-photo-row" key={s.id}><div className="admin-thumb">{preview[s.id] ? <img src={preview[s.id]} alt="Prévia"/> : <Photo service={s}/>}</div><div className="admin-photo-label"><strong>{s.name}</strong><small>{s.image ? 'Fotografia cadastrada' : 'Sem fotografia'}</small></div><label className="upload-btn"><UploadCloud size={17}/> {s.image ? 'Alterar foto' : 'Adicionar foto'}<input type="file" accept="image/jpeg,image/png,image/webp" disabled={busy} onChange={e => { selectPhoto(s.id, e.target.files?.[0]); e.target.value = ''; }}/></label>{pending[s.id] && <button className="upload-btn save-photo" disabled={busy} onClick={() => void upload(s.id)}><Check size={16}/> Salvar foto</button>}{s.image && <button className="delete-photo" aria-label={`Remover foto de ${s.name}`} disabled={busy} onClick={() => remove(s.id)}><Trash2 size={17}/></button>}</div>)}</div></section>
     <section className="admin-panel"><div className="panel-heading"><Sparkles size={21}/><div><h2>Identidade e contato</h2><p>Personalize o nome do estúdio e o contato de agendamento.</p></div></div><div className="settings-grid"><label>Nome do estúdio<input maxLength={80} value={draft.studioName} onChange={e => setDraft({ ...draft, studioName: e.target.value })}/></label><label>Subtítulo<input maxLength={160} value={draft.tagline} onChange={e => setDraft({ ...draft, tagline: e.target.value })}/></label><label>WhatsApp do estúdio (somente números, com DDI + DDD)<input placeholder="5583999999999" inputMode="numeric" value={draft.whatsapp} onChange={e => setDraft({ ...draft, whatsapp: e.target.value.replace(/\D/g, '') })}/></label></div></section>
-    <section className="admin-panel"><div className="panel-heading"><CalendarDays size={21}/><div><h2>Dias e horários</h2><p>Defina em quais dias e horários as clientes podem fazer solicitações.</p></div></div><div className="day-selector">{weekdays.map((label, i) => <label key={i}><input type="checkbox" checked={draft.days.includes(i)} onChange={e => setDraft({ ...draft, days: e.target.checked ? [...draft.days, i].sort() : draft.days.filter(x => x !== i) })}/><span>{label}</span></label>)}</div><div className="settings-grid"><label>Abertura<input type="time" value={draft.startTime} onChange={e => setDraft({ ...draft, startTime: e.target.value })}/></label><label>Encerramento<input type="time" value={draft.endTime} onChange={e => setDraft({ ...draft, endTime: e.target.value })}/></label><label>Intervalo entre opções (minutos)<select value={draft.interval} onChange={e => setDraft({ ...draft, interval: Number(e.target.value) })}>{[15,30,45,60,90,120,180,240].map(v => <option key={v} value={v}>{v} minutos</option>)}</select></label></div><label className="wide-label">Bloquear datas específicas (uma data por linha, formato AAAA-MM-DD)<textarea rows={3} placeholder="2026-12-25" value={draft.blockedDates.join('\n')} onChange={e => setDraft({ ...draft, blockedDates: e.target.value.split(/\s+/).filter(Boolean) })}/></label><p className="admin-help">Importante: os horários representam preferências. A disponibilidade real deve ser confirmada pelo WhatsApp.</p></section>
+    <section className="admin-panel"><div className="panel-heading"><CalendarDays size={21}/><div><h2>Dias e horários</h2><p>Defina em quais dias e horários as clientes podem fazer solicitações.</p></div></div><div className="day-selector">{weekdays.map((label, i) => <label key={i}><input type="checkbox" checked={draft.days.includes(i)} onChange={e => setDraft({ ...draft, days: e.target.checked ? [...draft.days, i].sort() : draft.days.filter(x => x !== i) })}/><span>{label}</span></label>)}</div><div className="settings-grid"><label>Abertura<input type="time" value={draft.startTime} onChange={e => setDraft({ ...draft, startTime: e.target.value })}/></label><label>Encerramento<input type="time" value={draft.endTime} onChange={e => setDraft({ ...draft, endTime: e.target.value })}/></label><label>Intervalo entre opções (minutos)<select value={draft.interval} onChange={e => setDraft({ ...draft, interval: Number(e.target.value) })}>{[15,30,45,60,90,120,180,240].map(v => <option key={v} value={v}>{v} minutos</option>)}</select></label><label>Duração da primeira aplicação (minutos)<input type="number" min={15} max={480} step={15} value={draft.applicationMinutes??120} onChange={e=>setDraft({...draft,applicationMinutes:Number(e.target.value)})}/></label><label>Duração da manutenção (minutos)<input type="number" min={15} max={480} step={15} value={draft.maintenanceMinutes??60} onChange={e=>setDraft({...draft,maintenanceMinutes:Number(e.target.value)})}/></label></div><label className="wide-label">Bloquear datas específicas (uma data por linha, formato AAAA-MM-DD)<textarea rows={3} placeholder="2026-12-25" value={draft.blockedDates.join('\n')} onChange={e => setDraft({ ...draft, blockedDates: e.target.value.split(/\s+/).filter(Boolean) })}/></label><p className="admin-help">Ajuste as durações reais dos procedimentos antes de divulgar a agenda. Os horários só ficam ocupados após serem registrados na agenda acima; solicitações por WhatsApp não bloqueiam horários automaticamente.</p></section>
+    <section className="admin-panel"><div className="panel-heading"><CalendarDays size={21}/><div><h2>Agenda da Sophia — horários reservados</h2><p>Registre aqui cada atendimento confirmado pelo WhatsApp ou período indisponível. Os horários sobrepostos desaparecerão da seleção pública.</p></div></div>
+      <form onSubmit={addBlock} className="settings-grid"><label>Data<input type="date" min={today()} required value={blockDate} onChange={e=>setBlockDate(e.target.value)}/></label><label>Início<input type="time" required value={blockStart} onChange={e=>setBlockStart(e.target.value)}/></label><label>Fim do atendimento<input type="time" required value={blockEnd} onChange={e=>setBlockEnd(e.target.value)}/></label><button type="submit" className="btn btn-primary" disabled={busy}>Bloquear horário <Check size={17}/></button></form>
+      <div className="calendar-blocks">{!blocks.length?<p className="admin-help">Nenhum horário reservado a partir de hoje.</p>:blocks.map(b=><div className="calendar-block" key={b.id}><span><strong>{prettyDate(b.date)}</strong> — {b.start} às {b.end}</span><button className="btn btn-outline" type="button" disabled={busy} onClick={()=>void removeBlock(b.id)}><Trash2 size={16}/> Liberar</button></div>)}</div>
+    </section>
     <section className="admin-panel"><div className="panel-heading"><Heart size={21}/><div><h2>Preços dos procedimentos</h2><p>Edite os valores e nomes. As alterações aparecem no catálogo e agendamento.</p></div></div><div className="prices-admin">{draft.services.map((s, i) => <div className="price-admin-row" key={s.id}><label>Modelo<input maxLength={80} value={s.name} onChange={e => setDraft({ ...draft, services: draft.services.map((x, j) => i === j ? { ...x, name: e.target.value } : x) })}/></label><label>Aplicação (R$)<input type="number" min="0" max="100000" step="0.01" value={s.application} onChange={e => setDraft({ ...draft, services: draft.services.map((x, j) => i === j ? { ...x, application: Number(e.target.value) } : x) })}/></label><label>Manutenção (R$)<input type="number" min="0" max="100000" step="0.01" value={s.maintenance} onChange={e => setDraft({ ...draft, services: draft.services.map((x, j) => i === j ? { ...x, maintenance: Number(e.target.value) } : x) })}/></label></div>)}</div></section>
     <div className="save-bar"><span><ShieldCheck size={16}/> Modificações de fotos são salvas ao enviar. As demais precisam de "Salvar configurações".</span><button className="btn btn-primary" onClick={save} disabled={busy}>{busy ? 'Salvando…' : 'Salvar configurações'} <Check size={18}/></button></div>
   </div></main>;
